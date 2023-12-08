@@ -1,0 +1,134 @@
+package mongo.restaurant;
+
+
+
+import static spark.Spark.get; //Har bara get resurser
+import static spark.Spark.post; //Har bara post resurser
+
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Properties;
+
+import org.apache.commons.text.WordUtils;
+import org.bson.Document;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.mongodb.ConnectionString;
+import com.mongodb.MongoClientSettings;
+import com.mongodb.MongoException;
+import com.mongodb.client.DistinctIterable;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoCursor;
+import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Projections;
+
+
+
+public class RestBackend {
+
+	public static void main(String[] args) throws IOException {
+		String connString;
+		Logger logger = LoggerFactory.getLogger(RestBackend.class); //Logger används för att låta applikationen skriva ut något i konsolen, logga viktiga händelser, då ser vi hade som gått snett. Anrop på logger ger utskrift
+		InputStream input = new FileInputStream("connection.properties"); //Läser in connection.properties, anrop på input läser innehåll från properties
+
+			Properties prop = new Properties();
+			prop.load(input); //Läser allt som finns i input, alltså connection.properties
+			connString = prop.getProperty("db.connection_string"); //Ger oss värdet på connection.properties
+			logger.info(connString); //
+
+
+			ConnectionString connectionString = new ConnectionString(connString); //connString innehåller värdet av connection.properties. Connectionstring används för att koppla upp sig till databasen
+			MongoClientSettings settings = MongoClientSettings.builder().applyConnectionString(connectionString)
+					.build(); //Definierar hur mongodriver ska fungera med settings
+			MongoClient mongoClient = MongoClients.create(settings); //Skapar mongoclienten som kommer kopplas upp till databasen
+			MongoDatabase database = mongoClient.getDatabase(prop.getProperty("db.name")); //Hämtar en specifik databas
+			logger.info(prop.getProperty("db.name"));
+
+
+	      //JavaSparks kod kommer nu
+	      get("/restaurant/:name", (req,res)->{ //GET används för att hämta, följt av sökvägen. req används för att läsa av innehåll, res används för att påverka innehåll
+		      MongoCollection<Document> collection = database.getCollection("restaurants"); //Hämtar ut den collection vi ska söka i
+		      String filter=req.params("name").toLowerCase(); //Plockar ut "name", gör allt till lowercase
+		      filter=WordUtils.capitalizeFully(filter); //Gör så att alla ord har första stor bokstav
+		      logger.info("Filtering Restaurants for name: " + filter); //Loggar ut det vi sökt efter
+	    	  Document myDoc = collection.find(Filters.eq("name", filter)).first(); //Hittar alla dokument i samlingen med fältet name som har filter-sträng. first betyder att vi slutar leta så fort vi hittat en. limit 1 funkar också
+	    	  if (myDoc != null) { //Tar bort ID så det inte visas i resultatet. Måste göra en if-sats som kollar om vi fått något först, annars krasch
+	    	      myDoc.remove("_id");
+	    	    
+	    	  } else {
+	    		  res.status(404); //Om vi ej fått något sätter vi status till 404
+	    		  return ("<html><body><h1>Title not found. </h1></body></html>"); //Här kommer vi behöva returnera JSON. Vi ska inte använda html!!
+	    	  }
+	          return myDoc.toJson(); //Om vi hittar ett dokument returnerar den dokumentet, gör om den till json. Vi behöver ej göra res status 200 pga den är redan det som default
+	      });
+	    post("/restaurant", (request, response) -> { //post används när användaren vill skicka data till servern.
+	    	    response.type("application/json"); //type gör så den alltid kommer returnera application json
+	    	    try {
+	    	    	MongoCollection<Document> collection = database.getCollection("restaurants");
+	               collection.insertOne(new Document(Document.parse(request.body()))); //request.body är innehållet i requesten. parse läser inkommande body och gör om den till ett mongodb dokument. vi lägger in innehållet i ett nytt dokument, mha insertOne
+	 		      logger.info("Adding Restaurant "); //Skriver ut i loggen
+
+	                       
+	            } catch (MongoException me) {
+	                System.err.println("Unable to insert due to an error: " + me); //Skriver ut en error om nåt gick fel
+	            }
+	    	    
+	    	    response.status(202); //Om allt gick bra sätter vi statuskod 202
+	    		  return ("<html><body><h1>Restaurant Accepted. </h1></body></html>"); //Returnerar en html
+	    	});
+	      get("/cuisine", (req,res)->{
+		      MongoCollection<Document> collection = database.getCollection("restaurants");
+		     logger.info("Finding all different cuisines ");
+	    	  DistinctIterable<String> col = collection.distinct("cuisine", String.class); //DistinctIterable gör så varje entry måste vara unikt. då kan t ex bara American komma en gång
+	    	  JsonArray list = new JsonArray(); //Skapar en json array
+	    	  JsonObject myDoc = new JsonObject(); //Skapar ett jsonobjekt
+	    	  if (col != null) { //går igenom listan och läggar in det i json array
+	    		  for (String tmp : col) { 
+	    			  list.add(tmp);	 
+	    		  }
+	    	  myDoc.add("cuisines", list);	//Lägger in array i mongodb dokument, döper den till cuisines, denna bör innehålla varje smak 1 gång  
+	    	  } else {
+	    		  res.status(404); //Om det ej funkar sätter vi status 404
+	    		  return ("<html><body><h1>No choices of cuisine for you!! </h1></body></html>");
+	    	  }
+	          return myDoc; //Returnerar dokumentet
+	      });
+	      get("/restaurant/cuisine/:cuisine", (req,res)->{
+		      MongoCollection<Document> collection = database.getCollection("restaurants");
+		      String filter=req.params("cuisine").toLowerCase();
+		      int limit=10;
+		      if (req.queryParams("limit")!=null) {
+		    	  try {
+		    	      limit=Integer.parseInt(req.queryParams("limit"));
+		    	  } catch (NumberFormatException e) { }
+		      }
+		      filter=WordUtils.capitalizeFully(filter);
+		      logger.info("Finding restaurants serving: " + filter);
+		      MongoCursor<Document> cursor = collection.find(Filters.eq("cuisine", filter)).projection(Projections.include("name")).limit(limit).iterator();
+	    	  JsonArray ja=new JsonArray();
+		      Document tmp;
+		      try {
+		          while (cursor.hasNext()) {
+		        	  tmp=cursor.next();
+		        	  tmp.remove("_id");
+		        	  ja.add(tmp.toJson());
+		          }
+		      } finally {
+		          cursor.close();
+		      }
+		      JsonObject response=new JsonObject();
+			     response.add("restaurants",ja);
+              return response;
+	      });
+	}
+
+}
